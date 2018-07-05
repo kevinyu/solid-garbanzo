@@ -4,16 +4,21 @@ from collections import defaultdict
 from contextlib import contextmanager
 
 import numpy as np
+import scipy.stats
 from PyQt5 import QtWidgets as widgets
 from PyQt5.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt5 import QtGui as gui
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from scipy.spatial import distance
+from sklearn.decomposition import PCA
 try:
     from MulticoreTSNE import MulticoreTSNE as TSNE
 except ImportError:
     from sklearn.manifold import TSNE
+    print("Using sklearn TSNE")
+else:
+    print("Using MulticoreTSNE")
 
 from suss.gui.utils import require_dataset
 
@@ -30,14 +35,32 @@ def require_loaded(func):
 class BackgroundTSNE(QObject):
     finished = pyqtSignal(object)
 
-    def __init__(self, data):
+    def __init__(self, times, waveforms):
         super().__init__()
-        self.data = data
+        self.times = times
+        self.waveforms = waveforms
 
     @pyqtSlot()
     def computeTSNE(self):
-        tsne = TSNE(n_components=2).fit_transform(self.data)
-        print("Computed TSNE")
+        """Run a TSNE on the waveform data combined with time data
+
+        1. Runs 2d TSNE on 20 PCs of waveforms
+        2. z-scores output of step 1
+        3. Normalizes times by scaling to hours and subtracting mean
+        4. Combine to Nx3 array of (tsne1, tsne2, time)
+        5. Run 2d tsne again
+        """
+        print("began")
+        pcs = PCA(n_components=20).fit_transform(self.waveforms)
+        self.finished.emit(pcs[:, :2])
+        tsne_wf = TSNE(n_components=2).fit_transform(pcs)
+        self.finished.emit(tsne_wf)
+        print("Computed TSNE on waveforms")
+        t_hours = (self.times / (2. * 60. * 60.))
+        t_hours = t_hours - np.mean(t_hours)
+        stacked = np.hstack([tsne_wf, t_hours[:, None]])
+        tsne = TSNE(n_components=2).fit_transform(stacked)
+        print("Computed TSNE on waveforms + time")
         self.finished.emit(tsne)
 
 
@@ -95,7 +118,9 @@ class TSNEPlot(widgets.QFrame):
         self.loading = True
         self.base_dataset = self.dataset
         self.base_flattened = self.dataset.flatten(1)
-        self.worker = BackgroundTSNE(self.base_flattened.waveforms)
+        self.worker = BackgroundTSNE(
+                self.base_flattened.times,
+                self.base_flattened.waveforms)
         self.base_idx = self.base_flattened.ids
         self.base_labels = self.base_flattened.labels
 
@@ -169,6 +194,8 @@ class TSNEPlot(widgets.QFrame):
         self.ax.patch.set_alpha(0.8)
 
     def setup_data(self):
+        self.ax.clear()
+        self.ax.patch.set_alpha(0.8)
         self.scatters = defaultdict(list)
         self.flattened = self.dataset.flatten(1)
         self.current_idx = self.flattened.ids
